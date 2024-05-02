@@ -1,8 +1,7 @@
 use crate::app::config;
 use cosmic::iced::alignment::{Horizontal, Vertical};
-use cosmic::iced::{Alignment, Color, Length, Subscription};
+use cosmic::iced::{Alignment, Length, Subscription};
 use cosmic::iced_widget::row;
-use cosmic::prelude::CollectionWidget;
 use cosmic::{cosmic_theme, theme, widget, Apply, Element};
 use done_core::models::list::List;
 use done_core::models::status::Status;
@@ -59,26 +58,19 @@ impl Content {
     }
 
     fn list_header<'a>(&'a self, list: &'a List) -> Element<'a, Message> {
-        let cosmic_theme::Spacing {
-            space_none,
-            space_xxs,
-            space_s,
-            ..
-        } = theme::active().cosmic().spacing;
+        let spacing = theme::active().cosmic().spacing;
         let export_button = widget::button(config::get_icon("share-symbolic", 18))
             .style(theme::Button::Suggested)
-            .padding(space_xxs)
+            .padding(spacing.space_xxs)
             .on_press(Message::Export(self.tasks.values().cloned().collect()));
+        let default_icon = emojis::get_by_shortcode("pencil").unwrap().to_string();
+        let icon = list.icon.clone().unwrap_or(default_icon);
 
         widget::row::with_capacity(3)
             .align_items(Alignment::Center)
-            .spacing(space_s)
-            .padding([space_none, space_xxs])
-            .push_maybe(
-                list.icon
-                    .as_deref()
-                    .map(|icon| widget::icon::from_name(icon).size(24).icon()),
-            )
+            .spacing(spacing.space_s)
+            .padding([spacing.space_none, spacing.space_xxs])
+            .push(widget::text(icon).size(spacing.space_m))
             .push(widget::text::title3(&list.name).width(Length::Fill))
             .push(export_button)
             .into()
@@ -89,7 +81,6 @@ impl Content {
             space_none,
             space_xxxs,
             space_xxs,
-            space_xs,
             ..
         } = theme::active().cosmic().spacing;
 
@@ -113,6 +104,11 @@ impl Content {
                 .style(theme::Button::Destructive)
                 .on_press(Message::Delete(id));
 
+            let details_button = widget::button(config::get_icon("info-outline-symbolic", 18))
+                .padding(space_xxs)
+                .style(theme::Button::Standard)
+                .on_press(Message::Select(item.clone()));
+
             let task_item_text =
                 widget::editable_input("", &item.title, *self.editing.get(id).unwrap_or(&false), {
                     let id = id.clone();
@@ -123,21 +119,23 @@ impl Content {
                 .on_input(move |text| Message::TitleUpdate(id, text))
                 .width(Length::Fill);
 
-            let row = widget::row::with_capacity(3)
+            let row = widget::row::with_capacity(4)
                 .align_items(Alignment::Center)
                 .spacing(space_xxs)
+                .padding([space_xxxs, space_xxs])
                 .push(item_checkbox)
                 .push(task_item_text)
+                .push(details_button)
                 .push(delete_button);
 
-            let button = widget::button(row)
-                .padding([space_xxs, space_xs])
-                .width(Length::Fill)
-                .height(Length::Shrink)
-                .style(button_style(false, true))
-                .on_press(Message::Select(item.clone()));
+            // let button = widget::button(row)
+            //     .padding([space_xxs, space_xs])
+            //     .width(Length::Fill)
+            //     .height(Length::Shrink)
+            //     .style(button_style(false, true))
+            //     .on_press(Message::Select(item.clone()));
 
-            items = items.add(button);
+            items = items.add(row);
         }
 
         widget::column::with_capacity(2)
@@ -261,7 +259,8 @@ impl Content {
                     if !self.input.is_empty() {
                         let task = Task::new(self.input.clone(), list.id.clone());
                         commands.push(Command::CreateTask(task.clone()));
-                        self.tasks.insert(task);
+                        let id = self.tasks.insert(task);
+                        self.task_input_ids.insert(id, widget::Id::unique());
                         self.input.clear();
                     }
                 }
@@ -309,60 +308,5 @@ impl Content {
 
     pub fn subscription(&self) -> Subscription<Message> {
         Subscription::none()
-    }
-}
-
-fn button_appearance(
-    theme: &theme::Theme,
-    selected: bool,
-    focused: bool,
-    accent: bool,
-    hovered: bool,
-) -> widget::button::Appearance {
-    let cosmic = theme.cosmic();
-    // TODO: Use this instead when it's working properly.
-    // let container = theme.current_container();
-
-    let mut appearance = widget::button::Appearance::new();
-
-    if selected {
-        if accent {
-            appearance.background = Some(Color::from(cosmic.primary_component_color()).into());
-            appearance.icon_color = Some(Color::from(cosmic.on_accent_color()));
-            appearance.text_color = Some(Color::from(cosmic.on_accent_color()));
-        } else {
-            appearance.background = Some(Color::from(cosmic.bg_component_color()).into());
-        }
-    }
-
-    if hovered {
-        appearance.background = Some(Color::from(cosmic.secondary_component_color()).into());
-        appearance.icon_color = Some(Color::from(cosmic.on_secondary_component_color()));
-        appearance.text_color = Some(Color::from(cosmic.on_secondary_component_color()));
-    }
-
-    if focused && accent {
-        appearance.outline_width = 1.0;
-        appearance.outline_color = Color::from(cosmic.accent_color());
-        appearance.border_width = 2.0;
-        appearance.border_color = Color::TRANSPARENT;
-    }
-    appearance.border_radius = cosmic.radius_s().into();
-    appearance
-}
-
-fn button_style(selected: bool, accent: bool) -> theme::Button {
-    //TODO: move to libcosmic?
-    theme::Button::Custom {
-        active: Box::new(move |focused, theme| {
-            button_appearance(theme, selected, focused, accent, false)
-        }),
-        disabled: Box::new(move |theme| button_appearance(theme, selected, false, accent, false)),
-        hovered: Box::new(move |focused, theme| {
-            button_appearance(theme, selected, focused, accent, true)
-        }),
-        pressed: Box::new(move |focused, theme| {
-            button_appearance(theme, selected, focused, accent, false)
-        }),
     }
 }
