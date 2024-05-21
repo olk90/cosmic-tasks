@@ -18,9 +18,9 @@ use cosmic::{
     app, cosmic_config, cosmic_theme, executor, theme, widget, Application, ApplicationExt,
     Command, Element,
 };
-use done_core::models::list::List;
-use done_core::models::task::Task;
-use done_core::service::Service;
+use cosmic_tasks_core::models::list::List;
+use cosmic_tasks_core::models::task::Task;
+use cosmic_tasks_core::service::{Provider, TaskService};
 
 use crate::app::config::{AppTheme, CONFIG_VERSION};
 use crate::app::key_bind::key_binds;
@@ -34,14 +34,16 @@ mod key_bind;
 pub mod localize;
 pub mod markdown;
 pub mod menu;
+pub mod settings;
 
 pub struct App {
     core: Core,
+    service: TaskService,
     nav_model: segmented_button::SingleSelectModel,
     content: Content,
     details: Details,
     config_handler: Option<cosmic_config::Config>,
-    config: config::Config,
+    config: config::CosmicTasksConfig,
     app_themes: Vec<String>,
     context_page: ContextPage,
     key_binds: HashMap<KeyBind, Action>,
@@ -56,6 +58,7 @@ pub enum Message {
     Details(details::Message),
     ToggleContextPage(ContextPage),
     LaunchUrl(String),
+    FetchLists,
     PopulateLists(Vec<List>),
     WindowClose,
     WindowNew,
@@ -64,7 +67,7 @@ pub enum Message {
     DialogUpdate(DialogPage),
     Key(Modifiers, Key),
     Modifiers(Modifiers),
-    AppTheme(AppTheme),
+    AppTheme(usize),
     SystemThemeModeChange(cosmic_theme::ThemeMode),
     OpenNewListDialog,
     OpenRenameListDialog,
@@ -109,7 +112,7 @@ pub enum DialogPage {
 #[derive(Clone, Debug)]
 pub struct Flags {
     pub config_handler: Option<cosmic_config::Config>,
-    pub config: config::Config,
+    pub config: config::CosmicTasksConfig,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,7 +168,7 @@ impl App {
     }
 
     fn about(&self) -> Element<Message> {
-        let cosmic_theme::Spacing { space_xxs, .. } = theme::active().cosmic().spacing;
+        let spacing = theme::active().cosmic().spacing;
         let repository = "https://github.com/edfloreshz/cosmic-tasks";
         let hash = env!("VERGEN_GIT_SHA");
         let short_hash: String = hash.chars().take(7).collect();
@@ -180,15 +183,15 @@ impl App {
             widget::text::title3(fl!("cosmic-tasks")).into(),
             widget::button::link(repository)
                 .on_press(Message::LaunchUrl(repository.to_string()))
-                .padding(0)
+                .padding(spacing.space_none)
                 .into(),
             widget::button::link(fl!("git-description", hash = short_hash.as_str(), date = date))
                 .on_press(Message::LaunchUrl(format!("{}/commits/{}", repository, hash)))
-                .padding(0)
+                .padding(spacing.space_none)
                 .into(),
         ])
         .align_items(Alignment::Center)
-        .spacing(space_xxs)
+        .spacing(spacing.space_xxs)
         .width(Length::Fill)
         .into()
     }
@@ -204,13 +207,7 @@ impl App {
                 widget::settings::item::builder(fl!("theme")).control(widget::dropdown(
                     &self.app_themes,
                     Some(app_theme_selected),
-                    move |index| {
-                        Message::AppTheme(match index {
-                            1 => AppTheme::Dark,
-                            2 => AppTheme::Light,
-                            _ => AppTheme::System,
-                        })
-                    },
+                    Message::AppTheme,
                 )),
             )
             .into()])
@@ -222,7 +219,8 @@ impl App {
             .insert()
             .text(format!(
                 "{} {}",
-                list.icon.clone()
+                list.icon
+                    .clone()
                     .unwrap_or(emojis::get_by_shortcode("pencil").unwrap().to_string()),
                 list.name.clone()
             ))
@@ -246,11 +244,12 @@ impl Application for App {
 
     fn init(mut core: Core, flags: Self::Flags) -> (Self, Command<CosmicMessage<Self::Message>>) {
         core.nav_bar_toggle_condensed();
-        let nav_model = segmented_button::ModelBuilder::default();
-
+        let nav_model = segmented_button::ModelBuilder::default().build();
+        let service = TaskService::new(Self::APP_ID, Provider::Computer);
         let app = App {
             core,
-            nav_model: nav_model.build(),
+            service: service.clone(),
+            nav_model,
             content: Content::new(),
             details: Details::new(),
             config_handler: flags.config_handler,
@@ -263,13 +262,9 @@ impl Application for App {
             dialog_text_input: widget::Id::unique(),
         };
 
-        let commands = vec![Command::perform(
-            todo::fetch_lists(),
-            |result| match result {
-                Ok(data) => message::app(Message::PopulateLists(data)),
-                Err(_) => message::none(),
-            },
-        )];
+        let commands = vec![Command::perform(TaskService::migrate(Self::APP_ID), |_| {
+            message::app(Message::FetchLists)
+        })];
 
         (app, Command::batch(commands))
     }
@@ -344,19 +339,16 @@ impl Application for App {
                 ),
             DialogPage::Icon(icon) => {
                 let icon_buttons: Vec<Element<_>> = emojis::iter()
-                    .into_iter()
                     .map(|emoji| {
                         widget::button(
                             widget::container(widget::text(emoji.to_string()))
                                 .width(spacing.space_l)
                                 .height(spacing.space_l)
                                 .align_y(Vertical::Center)
-                                .align_x(Horizontal::Center)
+                                .align_x(Horizontal::Center),
                         )
-                            .on_press(Message::DialogUpdate(DialogPage::Icon(
-                                emoji.to_string(),
-                            )))
-                            .into()
+                        .on_press(Message::DialogUpdate(DialogPage::Icon(emoji.to_string())))
+                        .into()
                     })
                     .collect();
                 let mut dialog = widget::dialog(fl!("icon-select"))
@@ -371,13 +363,15 @@ impl Application for App {
                     .control(
                         widget::container(scrollable(widget::row::with_children(vec![
                             widget::flex_row(icon_buttons).into(),
-                            horizontal_space(Length::Fixed(spacing.space_s as f32)).into()
+                            horizontal_space(Length::Fixed(spacing.space_s as f32)).into(),
                         ])))
-                            .height(Length::Fixed(300.0)),
+                        .height(Length::Fixed(300.0)),
                     );
 
                 if !icon.is_empty() {
-                    dialog = dialog.icon(widget::container(widget::text(icon.as_str()).size(spacing.space_l)));
+                    dialog = dialog.icon(widget::container(
+                        widget::text(icon.as_str()).size(spacing.space_l),
+                    ));
                 }
 
                 dialog
@@ -567,14 +561,15 @@ impl Application for App {
                     match content_command {
                         content::Command::Iced(command) => return command,
                         content::Command::GetTasks(list_id) => {
-                            commands.push(Command::perform(todo::fetch_tasks(list_id), |result| {
-                                match result {
+                            commands.push(Command::perform(
+                                todo::fetch_tasks(list_id, self.service.clone()),
+                                |result| match result {
                                     Ok(data) => message::app(Message::Content(
                                         content::Message::SetItems(data),
                                     )),
                                     Err(_) => message::none(),
-                                }
-                            }));
+                                },
+                            ));
                         }
                         content::Command::DisplayTask(task) => {
                             let entity =
@@ -597,18 +592,24 @@ impl Application for App {
                         }
                         content::Command::UpdateTask(task) => {
                             self.details.task = Some(task.clone());
-                            let command =
-                                Command::perform(todo::update_task(task), |result| match result {
+                            let command = Command::perform(
+                                todo::update_task(task, self.service.clone().clone()),
+                                |result| match result {
                                     Ok(_) => message::none(),
                                     Err(_) => message::none(),
-                                });
+                                },
+                            );
                             commands.push(command);
                         }
                         content::Command::Delete(id) => {
                             if let Some(list) = self.nav_model.data::<List>(self.nav_model.active())
                             {
                                 let command = Command::perform(
-                                    todo::delete_task(list.id.clone(), id.clone()),
+                                    todo::delete_task(
+                                        list.id().clone(),
+                                        id.clone(),
+                                        self.service.clone().clone(),
+                                    ),
                                     |result| match result {
                                         Ok(_) => message::none(),
                                         Err(_) => message::none(),
@@ -618,11 +619,13 @@ impl Application for App {
                             }
                         }
                         content::Command::CreateTask(task) => {
-                            let command =
-                                Command::perform(todo::create_task(task), |result| match result {
+                            let command = Command::perform(
+                                todo::create_task(task, self.service.clone()),
+                                |result| match result {
                                     Ok(_) => message::none(),
                                     Err(_) => message::none(),
-                                });
+                                },
+                            );
                             commands.push(command);
                         }
                         content::Command::Export(tasks) => {
@@ -696,12 +699,26 @@ impl Application for App {
                     log::warn!("failed to open {:?}: {}", url, err);
                 }
             },
-            Message::AppTheme(app_theme) => {
+            Message::AppTheme(index) => {
+                let app_theme = match index {
+                    1 => AppTheme::Dark,
+                    2 => AppTheme::Light,
+                    _ => AppTheme::System,
+                };
                 config_set!(app_theme, app_theme);
                 return self.update_config();
             }
             Message::SystemThemeModeChange(_) => {
                 return self.update_config();
+            }
+            Message::FetchLists => {
+                commands.push(Command::perform(
+                    todo::fetch_lists(self.service.clone()),
+                    |result| match result {
+                        Ok(data) => message::app(Message::PopulateLists(data)),
+                        Err(_) => message::none(),
+                    },
+                ));
             }
             Message::PopulateLists(lists) => {
                 for list in lists {
@@ -734,14 +751,13 @@ impl Application for App {
             }
             Message::DeleteList => {
                 if let Some(list) = self.nav_model.data::<List>(self.nav_model.active()) {
-                    let command =
-                        Command::perform(
-                            todo::delete_list(list.id.clone()),
-                            |result| match result {
-                                Ok(_) => message::none(),
-                                Err(_) => message::none(),
-                            },
-                        );
+                    let command = Command::perform(
+                        todo::delete_list(list.id().clone(), self.service.clone()),
+                        |result| match result {
+                            Ok(_) => message::none(),
+                            Err(_) => message::none(),
+                        },
+                    );
 
                     commands.push(self.update(Message::Content(content::Message::List(None))));
 
@@ -799,23 +815,24 @@ impl Application for App {
                 if let Some(dialog_page) = self.dialog_pages.pop_front() {
                     match dialog_page {
                         DialogPage::New(name) => {
-                            let list = List::new(&name, Service::Computer);
-                            commands.push(Command::perform(todo::create_list(list), |result| {
-                                match result {
+                            let list = List::new(&name);
+                            commands.push(Command::perform(
+                                todo::create_list(list, self.service.clone()),
+                                |result| match result {
                                     Ok(list) => message::app(Message::AddList(list)),
                                     Err(_) => message::none(),
-                                }
-                            }));
+                                },
+                            ));
                         }
                         DialogPage::Rename { to: name } => {
                             let entity = self.nav_model.active();
                             self.nav_model.text_set(entity, name.clone());
                             if let Some(list) = self.nav_model.active_data_mut::<List>() {
                                 list.name = name.clone();
-                                let command =
-                                    Command::perform(todo::update_list(list.clone()), |_| {
-                                        message::none()
-                                    });
+                                let command = Command::perform(
+                                    todo::update_list(list.clone(), self.service.clone()),
+                                    |_| message::none(),
+                                );
                                 commands.push(command);
                             }
                         }
@@ -826,17 +843,14 @@ impl Application for App {
                             if let Some(list) = self.nav_model.active_data::<List>() {
                                 let entity = self.nav_model.active();
                                 let title = format!("{} {}", icon.clone(), list.name.clone());
-                                self.nav_model.text_set(
-                                    entity,
-                                    title,
-                                );
+                                self.nav_model.text_set(entity, title);
                             }
                             if let Some(list) = self.nav_model.active_data_mut::<List>() {
                                 list.icon = Some(icon);
-                                let command =
-                                    Command::perform(todo::update_list(list.clone()), |_| {
-                                        message::none()
-                                    });
+                                let command = Command::perform(
+                                    todo::update_list(list.clone(), self.service.clone()),
+                                    |_| message::none(),
+                                );
                                 commands.push(command);
                             }
                         }
@@ -866,7 +880,6 @@ impl Application for App {
 
     fn view(&self) -> Element<Self::Message> {
         let content_view = self.content.view().map(Message::Content);
-
-        widget::column::with_children(vec![content_view]).into()
+        content_view
     }
 }
